@@ -1,0 +1,28 @@
+# Виртуальные окружения
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Данные
+data/
+data/*.*
+!data/*.py  # если нужно оставить __init__.py
+
+# Большие бинарные файлы
+*.dylib
+*.so
+*.dll
+*.whl
+*.bin
+*.pth
+
+# Логи и системные файлы
+*.log
+.DS_Store
+Thumbs.db
+
+# Конфигурация
+.env
+config/local/
