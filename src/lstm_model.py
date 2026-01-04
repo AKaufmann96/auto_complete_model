@@ -5,6 +5,7 @@ from typing import List, Optional
 import numpy as np
 import os
 
+
 class LSTMModel(nn.Module):
     """
     LSTM-модель для предсказания следующего токена.
@@ -95,61 +96,73 @@ class LSTMModel(nn.Module):
     ) -> str:
         """
         Генерация продолжения текста.
+        
         :param start_text: Начало текста.
         :param vocab: Словарь (слово -> индекс).
         :param reverse_vocab: Обратный словарь (индекс -> слово).
         :param max_length: Максимальное число генерируемых токенов.
-        :param temperature: Температура для сэмплирования (меньше 1 — консервативнее).
+        :param temperature: Температура для сэмплирования.
         :param device: Устройство ('cpu' или 'cuda').
-        :return: Сгенерированное продолжение.
+        :return: Сгенерированное продолжение (только новая часть).
         """
         self.eval()
         with torch.no_grad():
+            # Подготавливаем входной текст
             tokens = start_text.lower().split()
             if not tokens:
                 return ""
 
             # Преобразуем в индексы
-            input_ids = []
-            for token in tokens:
-                idx = vocab.get(token, vocab["<UNK>"])
-                input_ids.append(idx)
+            input_ids = [vocab.get(token, vocab["<UNK>"]) for token in tokens]
+            
+            seq_len = 128
 
-            # Ограничиваем длину
-            max_seq_len = self.embedding.num_embeddings  # Используем как max_length из датасета
-            if len(input_ids) >= max_seq_len:
-                input_ids = input_ids[-(max_seq_len - 1):]
+            # Ограничиваем длину входа, чтобы влезло место для генерации
+            if len(input_ids) >= seq_len:
+                input_ids = input_ids[-(seq_len - 1):]  # оставляем место для новых токенов
+
+            # Список для всех токенов (вход + продолжение)
+            generated_tokens = tokens.copy()
 
             for _ in range(max_length):
-                # Преобразуем в тензор
-                input_tensor = torch.tensor([input_ids], dtype=torch.long).to(device)
+                # Берём последние seq_len токенов
+                current_input = input_ids[-seq_len:]
+                input_tensor = torch.tensor([current_input], dtype=torch.long).to(device)
 
-                # Предсказание
+                # Прямой проход
                 logits = self.forward(input_tensor)  # (1, vocab_size)
-                logits = logits[:, -1] / (temperature + 1e-9)
 
-                # Применяем softmax
-                probs = F.softmax(logits, dim=-1)
+                # Температура и вероятности
+                logits = logits / max(temperature, 1e-9)
+                probs = F.softmax(logits, dim=-1)[0]  # (vocab_size,)
 
-                # Исключаем <PAD> и <UNK> при генерации, если возможно
+                # Блокируем <PAD> и <UNK>
                 probs[vocab["<PAD>"]] = 0
-                if probs.sum() == 0:
-                    probs[vocab["<PAD>"]] = 1e-5  # fallback
+                if vocab.get("<UNK>") is not None:
+                    probs[vocab["<UNK>"]] = 0
+
+                # Проверка на валидные токены
+                if probs.sum() <= 1e-8:
+                    break  # нет куда генерировать
+
                 probs = probs / probs.sum()
 
                 # Сэмплируем следующий токен
                 next_token_idx = torch.multinomial(probs, 1).item()
 
-                # Если сгенерирован <PAD> — завершаем
+                # Прерываем, если <PAD>
                 if next_token_idx == vocab["<PAD>"]:
                     break
 
                 # Добавляем в последовательность
                 input_ids.append(next_token_idx)
-                tokens.append(reverse_vocab.get(next_token_idx, "<UNK>"))
+                next_token = reverse_vocab.get(next_token_idx, "<UNK>")
+                generated_tokens.append(next_token)
 
-            generated_text = " ".join(tokens[len(start_text.split()):])
-            return generated_text.strip()
+            # Возвращаем ТОЛЬКО продолжение
+            prefix_length = len(tokens)
+            completion = " ".join(generated_tokens[prefix_length:])
+            return completion.strip()
 
     def save(self, path: str):
         """Сохраняет модель."""

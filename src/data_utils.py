@@ -15,13 +15,36 @@ TEST_DATA_PATH = "data/test.csv"
 
 def clean_text(text: str) -> str:
     """
-    Очищает текст: приводит к нижнему регистру, удаляет спецсимволы, оставляет только кириллицу, латиницу и пробелы.
+    Очищает и нормализует англоязычный текст твита:
+    - Приводит к нижнему регистру.
+    - Удаляет URL.
+    - Сохраняет @mentions и #hashtags как токены.
+    - Удаляет или заменяет специальные символы, оставляя значимые.
+    - Сохраняет апострофы в сокращениях (например, "don't", "it's").
+    - Удаляет повторяющиеся пробелы.
     """
     if not isinstance(text, str):
-        text = ""
+        return ""
+
     text = text.lower()
-    text = re.sub(r'[^а-яёa-z0-9\s]', '', text)
+
+    # Удаление URL
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+
+    # Удаление email-адресов
+    text = re.sub(r'\S+@\S+', '', text)
+
+    # Сохранение хэштегов и упоминаний как осмысленных токенов (убираем только символ, оставляя текст)
+    text = re.sub(r'#(\w+)', r'\1', text)   # Заменяем #хеш на хеш
+    text = re.sub(r'@(\w+)', r'\1', text)   # Заменяем @user на user
+
+    # Сохранение апострофов в словах (например, don't, it's)
+    # Удаление прочих спецсимволов, кроме букв, цифр, пробелов и апострофа
+    text = re.sub(r"[^a-z0-9\s']", '', text)
+
+    # Замена множественных пробелов на один
     text = re.sub(r'\s+', ' ', text).strip()
+
     return text
 
 def load_and_clean_data() -> pd.DataFrame:
@@ -31,12 +54,12 @@ def load_and_clean_data() -> pd.DataFrame:
     print("Загрузка и очистка данных...")
     df = pd.read_csv(RAW_DATA_PATH)
     
-    # Предполагаем, что в датасете есть колонка 'text' с текстами
+    # Проверка наличия колонки 'text'
     if 'text' not in df.columns:
         raise ValueError("В датасете отсутствует колонка 'text'. Проверьте структуру raw_dataset.csv.")
     
     df['cleaned_text'] = df['text'].apply(clean_text)
-    df = df[df['cleaned_text'].str.len() > 0]  # Удаляем пустые тексты
+    df = df[df['cleaned_text'].str.len() > 0]  # Удаление пустых текстов
     df = df[['cleaned_text']].rename(columns={'cleaned_text': 'text'})
     
     print(f"Обработано {len(df)} текстов.")
@@ -44,7 +67,7 @@ def load_and_clean_data() -> pd.DataFrame:
 
 def tokenize_and_save(df: pd.DataFrame):
     """
-    Токенизирует тексты (простое разбиение по пробелам) и сохраняет обработанный датасет.
+    Токенизирует тексты (разделение по пробелам) и сохраняет обработанный датасет.
     """
     print("Токенизация текстов...")
     df['tokens'] = df['text'].apply(lambda x: x.split())
