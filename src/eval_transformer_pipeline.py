@@ -71,7 +71,7 @@ def generate_completion_transformer(
         return_tensors="pt",
         truncation=True,
         max_length=tokenizer.model_max_length - max_gen_length,
-        padding=False
+        padding=False,
     ).to(device)
 
     # Генерация
@@ -84,14 +84,14 @@ def generate_completion_transformer(
             top_p=top_p,
             temperature=temperature,
             pad_token_id=tokenizer.pad_token_id,
-            num_return_sequences=1
+            num_return_sequences=1,
         )
 
     # Декодирование
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     # Убираем контекст из сгенерированного текста
     if generated_text.startswith(context):
-        completion = generated_text[len(context):].strip()
+        completion = generated_text[len(context) :].strip()
     else:
         # Если не начинается — возвращаем всё после контекста
         completion = generated_text.strip()
@@ -106,14 +106,16 @@ def evaluate_transformer_on_dataset(
     batch_size: int = 16,  # меньше, чем для LSTM — из-за размера модели
     max_samples: int = 1000,
     max_gen_length: int = 50,
-    save_results: bool = True
+    save_results: bool = True,
 ) -> Dict[str, float]:
     """
     Оценка модели трансформера на выборке: ROUGE-метрики.
     """
     print(f"Оценка DistilGPT-2 на {split} выборке...")
 
-    dataloader = get_dataloader(split, batch_size=1, num_workers=0)  # берём по одному тексту
+    dataloader = get_dataloader(
+        split, batch_size=1, num_workers=0
+    )  # берём по одному тексту
     references = []
     candidates = []
     contexts_list = []
@@ -130,7 +132,7 @@ def evaluate_transformer_on_dataset(
                 tokenizer=tokenizer,
                 input_text=text,
                 device=DEVICE,
-                max_gen_length=max_gen_length
+                max_gen_length=max_gen_length,
             )
             if target.strip() and generated.strip():
                 references.append(target)
@@ -151,11 +153,9 @@ def evaluate_transformer_on_dataset(
 
     # Сохраняем примеры
     if save_results:
-        results_df = pd.DataFrame({
-            "context": contexts_list,
-            "target": references,
-            "generated": candidates
-        })
+        results_df = pd.DataFrame(
+            {"context": contexts_list, "target": references, "generated": candidates}
+        )
         results_path = os.path.join(RESULTS_DIR, f"transformer_{split}_results.csv")
         results_df.to_csv(results_path, index=False)
         print(f"Результаты сохранены в {results_path}")
@@ -164,10 +164,7 @@ def evaluate_transformer_on_dataset(
 
 
 def generate_transformer_examples(
-    model,
-    tokenizer,
-    sample_texts: List[str],
-    max_gen_length: int = 10
+    model, tokenizer, sample_texts: List[str], max_gen_length: int = 10
 ):
     """
     Выводит примеры генерации трансформера.
@@ -180,7 +177,7 @@ def generate_transformer_examples(
             input_text=text,
             device=DEVICE,
             max_gen_length=max_gen_length,
-            temperature=0.8
+            temperature=0.8,
         )
         print(f"  '{text}' → '{generated}'")
     print()
@@ -195,10 +192,10 @@ def main():
 
     # Примеры генерации
     sample_texts = [
-        "привет как",
-        "сегодня погода",
-        "я хочу рассказать",
-        "в банке произошла"
+        "hello how are",
+        "the weather today",
+        "i want to tell",
+        "in the bank there was",
     ]
     generate_transformer_examples(model, tokenizer, sample_texts, max_gen_length=10)
 
@@ -208,7 +205,7 @@ def main():
         tokenizer=tokenizer,
         split="val",
         max_samples=500,
-        max_gen_length=50
+        max_gen_length=50,
     )
 
     return rouge_scores

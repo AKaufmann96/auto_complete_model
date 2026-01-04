@@ -26,7 +26,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MAX_GEN_LENGTH = 10
 TEMPERATURE = 0.8
 
-def train_epoch(model: LSTMModel, dataloader: DataLoader, optimizer: optim.Optimizer, criterion: nn.CrossEntropyLoss):
+
+def train_epoch(
+    model: LSTMModel,
+    dataloader: DataLoader,
+    optimizer: optim.Optimizer,
+    criterion: nn.CrossEntropyLoss,
+):
     """
     Обучение модели на одной эпохе.
     """
@@ -37,11 +43,11 @@ def train_epoch(model: LSTMModel, dataloader: DataLoader, optimizer: optim.Optim
 
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
     for input_ids, target_ids in progress_bar:
-        input_ids = input_ids.to(DEVICE)      # (batch_size, seq_len)
-        target_ids = target_ids.to(DEVICE)    # (batch_size,)
+        input_ids = input_ids.to(DEVICE)  # (batch_size, seq_len)
+        target_ids = target_ids.to(DEVICE)  # (batch_size,)
 
         optimizer.zero_grad()
-        logits = model(input_ids)             # (batch_size, vocab_size)
+        logits = model(input_ids)  # (batch_size, vocab_size)
         loss = criterion(logits, target_ids)
 
         loss.backward()
@@ -79,7 +85,7 @@ def train_model():
         hidden_dim=HIDDEN_DIM,
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
-        pad_idx=pad_idx
+        pad_idx=pad_idx,
     ).to(DEVICE)
 
     # Оптимизатор и лосс
@@ -104,12 +110,20 @@ def train_model():
         # Примеры генерации
         print("Примеры автодополнения:")
         sample_texts = [
-            "привет как",
-            "сегодня погода",
-            "я хочу рассказать",
-            "в банке произошла"
+            "hello how are",
+            "the weather today",
+            "i want to tell",
+            "in the bank there was",
         ]
-        generate_examples(model, sample_texts, vocab, reverse_vocab, DEVICE, max_length=MAX_GEN_LENGTH, temperature=TEMPERATURE)
+        generate_examples(
+            model,
+            sample_texts,
+            vocab,
+            reverse_vocab,
+            DEVICE,
+            max_length=MAX_GEN_LENGTH,
+            temperature=TEMPERATURE,
+        )
 
         # Сохранение лучшей модели
         if val_loss < best_val_loss:
