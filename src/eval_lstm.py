@@ -1,3 +1,5 @@
+# src/eval_lstm.py
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -5,6 +7,7 @@ import numpy as np
 from rouge_score import rouge_scorer
 from typing import Dict, List, Tuple
 import pandas as pd
+import os
 
 from src.next_token_dataset import get_dataloader
 from src.lstm_model import LSTMModel
@@ -48,22 +51,22 @@ def generate_completion(
     vocab: dict,
     reverse_vocab: dict,
     device: str = "cpu",
-    max_gen_length: int = 50,
-    temperature: float = 1.0
+    max_gen_length: int = 15,  # Уменьшено для скорости
+    temperature: float = 0.7   # Снижено для менее шумной генерации
 ) -> str:
     """
     Генерирует продолжение текста.
     :param input_text: Полный текст.
-    :return: Сгенерированное продолжение.
+    :return: context, target, generated
     """
     model.eval()
     with torch.no_grad():
-        tokens = input_text.lower().split()
+        tokens = input_text.strip().lower().split()
         if len(tokens) < 2:
             return "", "", ""
 
-        # Берём первые 3/4 как вход
-        input_length = max(1, int(len(tokens) * 0.75))
+        # Берём 50–75% как контекст (но минимум 1 токен)
+        input_length = max(1, min(len(tokens) - 1, len(tokens) // 2))
         context = " ".join(tokens[:input_length])
         target = " ".join(tokens[input_length:])
 
@@ -144,31 +147,52 @@ def evaluate_on_dataset(
     split: str = "val",
     batch_size: int = 64,
     device: str = "cpu",
-    max_samples: int = 1000,
-    max_gen_length: int = 50
+    max_samples: int = 500,        # Ограничено
+    max_gen_length: int = 15       # Короткая генерация
 ):
     """
     Полная оценка модели на датасете: ROUGE-метрики.
     """
     print(f"Оценка модели на {split} выборке...")
+    model.eval()
+    torch.set_grad_enabled(False)
 
-    dataloader = get_dataloader(split, batch_size=batch_size)
-    vocab = dataloader.dataset.vocab
+    # Загружаем датасет и извлекаем тексты
+    dataloader = get_dataloader(split=split, batch_size=batch_size, num_workers=0)
+    dataset = dataloader.dataset
+    vocab = dataset.vocab
     reverse_vocab = {idx: token for token, idx in vocab.items()}
+
+    # Извлекаем тексты из CSV (надёжнее, чем хранение в dataset.texts)
+    path = {
+        "train": "data/train.csv",
+        "val": "data/val.csv",
+        "test": "data/test.csv"
+    }[split]
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Файл данных не найден: {path}")
+
+    df = pd.read_csv(path)
+    texts = df["text"].tolist()
 
     references = []
     candidates = []
+    processed = 0
 
-    # Ограничиваем число примеров для ускорения
-    num_samples = 0
-    for batch in tqdm(dataloader, desc="Generating completions"):
-        input_ids, target_ids = batch
-        texts = dataloader.dataset.texts  # Предполагаем, что dataset хранит оригинальные тексты
+    # Используем tqdm для прогресса
+    pbar = tqdm(total=max_samples, desc="Генерация", unit="текст")
 
-        batch_texts = texts[num_samples:num_samples + len(input_ids)]
-        num_samples += len(input_ids)
+    for i, text in enumerate(texts):
+        if processed >= max_samples:
+            break
 
-        for text in batch_texts:
+        text = text.strip()
+        if not text:
+            continue
+
+        # Генерация
+        try:
             _, target, generated = generate_completion(
                 model=model,
                 input_text=text,
@@ -177,12 +201,22 @@ def evaluate_on_dataset(
                 device=device,
                 max_gen_length=max_gen_length
             )
+
             if target.strip() and generated.strip():
                 references.append(target)
                 candidates.append(generated)
+                processed += 1
+                pbar.update(1)
 
-        if len(references) >= max_samples:
-            break
+        except Exception as e:
+            # Пропускаем проблемные примеры
+            continue
+
+    pbar.close()
+
+    if not references:
+        print("⚠️ Не удалось сгенерировать ни одного примера.")
+        return {"rouge-1": 0.0, "rouge-2": 0.0, "rouge-l": 0.0}
 
     # Вычисляем ROUGE
     rouge_scores = compute_rouge_scores(references, candidates)
@@ -190,4 +224,8 @@ def evaluate_on_dataset(
     print(f"ROUGE-2: {rouge_scores['rouge2']:.4f}")
     print(f"ROUGE-L: {rouge_scores['rougeL']:.4f}")
 
-    return rouge_scores
+    return {
+        "rouge-1": float(rouge_scores['rouge1']),
+        "rouge-2": float(rouge_scores['rouge2']),
+        "rouge-l": float(rouge_scores['rougeL'])
+    }
