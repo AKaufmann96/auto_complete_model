@@ -60,7 +60,7 @@ def generate_completion(
     with torch.no_grad():
         tokens = input_text.lower().split()
         if len(tokens) < 2:
-            return ""
+            return "", "", ""
 
         # Берём первые 3/4 как вход
         input_length = max(1, int(len(tokens) * 0.75))
