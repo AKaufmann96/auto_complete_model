@@ -6,8 +6,8 @@ from rouge_score import rouge_scorer
 from typing import Dict, List, Tuple
 import pandas as pd
 import os
+import pickle
 
-from src.next_token_dataset import get_dataloader
 from src.lstm_model import LSTMModel
 
 
@@ -19,7 +19,7 @@ def evaluate_model(
     pad_idx: int = 0
 ) -> Tuple[float, float]:
     """
-    Оценивает модель: loss и accuracy с маской на <PAD>.
+    Оценивает модель по loss и accuracy с маской на <PAD>.
     """
     model.eval()
     total_loss = 0.0
@@ -79,14 +79,22 @@ def generate_completion(
         target = " ".join(tokens[input_length:])
 
         # Генерация
-        generated = model.generate(
-            start_text=context,
-            vocab=vocab,
-            reverse_vocab=reverse_vocab,
-            max_length=max_gen_length,
-            temperature=temperature,
-            device=device
-        )
+        try:
+            generated = model.generate(
+                start_text=context,
+                vocab=vocab,
+                reverse_vocab=reverse_vocab,
+                max_length=max_gen_length,
+                temperature=temperature,
+                device=device
+            )
+            # Если model.generate вернул None или не строку
+            if not isinstance(generated, str):
+                generated = ""
+        except Exception as e:
+            print(f"[ERROR] Ошибка в model.generate для '{context}': {e}")
+            generated = ""
+
         return context, target, generated
 
 
@@ -127,20 +135,26 @@ def generate_examples(
     temperature: float = 0.8
 ):
     """
-    Выводит примеры генерации.
+    Выводит примеры генерации с защитой от ошибок.
     """
     model.eval()
     with torch.no_grad():
         for text in sample_texts:
-            completion = model.generate(
-                start_text=text,
-                vocab=vocab,
-                reverse_vocab=reverse_vocab,
-                max_length=max_length,
-                temperature=temperature,
-                device=device
-            )
-            print(f"  '{text}' → '{completion}'")
+            print(f"[LSTM] Обработка: '{text}'")  # 🔧 Отладка
+            try:
+                completion = model.generate(
+                    start_text=text,
+                    vocab=vocab,
+                    reverse_vocab=reverse_vocab,
+                    max_length=max_length,
+                    temperature=temperature,
+                    device=device
+                )
+                if not isinstance(completion, str):
+                    completion = "<не строка>"
+                print(f"  '{text}' → '{completion}'")
+            except Exception as e:
+                print(f"  ❌ Ошибка при генерации для '{text}': {type(e).__name__}: {e}")
     print()
 
 
@@ -151,36 +165,46 @@ def evaluate_on_dataset(
     device: str = "cpu",
     max_samples: int = 500,
     max_gen_length: int = 15
-):
+) -> Dict[str, float]:
     """
-    Оценка модели по ROUGE на реальных данных.
+    Оценка модели LSTM по ROUGE-метрикам на реальных данных.
     """
     print(f"Оценка модели на {split} выборке...")
-    model.eval()
-    torch.set_grad_enabled(False)
 
     path = {
         "train": "data/train.csv",
         "val": "data/val.csv",
         "test": "data/test.csv"
-    }[split]
+    }.get(split)
+
+    if path is None:
+        raise ValueError("split должен быть 'train', 'val' или 'test'")
 
     if not os.path.exists(path):
         raise FileNotFoundError(f"Файл данных не найден: {path}")
 
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, dtype=str).fillna("")
     texts = df["text"].tolist()
 
-    vocab = model.vocab if hasattr(model, 'vocab') else None
+    # 🔧 Загрузка vocab
+    vocab = getattr(model, 'vocab', None)
     if vocab is None:
-        # Если нет — загружаем из датасета
-        temp_loader = get_dataloader(split="train", batch_size=1)
-        vocab = temp_loader.dataset.vocab
+        vocab_path = "models/vocab.pkl"
+        if not os.path.exists(vocab_path):
+            raise FileNotFoundError(f"Файл словаря не найден: {vocab_path}")
+        with open(vocab_path, "rb") as f:
+            vocab = pickle.load(f)
+        print(f"[VOCAB] Загружен словарь из {vocab_path}, размер: {len(vocab)}")
+    else:
+        print("[VOCAB] Используется vocab из модели")
 
     reverse_vocab = {idx: token for token, idx in vocab.items()}
     references = []
     candidates = []
     processed = 0
+
+    model.eval()
+    torch.set_grad_enabled(False)
 
     pbar = tqdm(total=max_samples, desc="Генерация", unit="текст")
 
@@ -201,6 +225,12 @@ def evaluate_on_dataset(
                 max_gen_length=max_gen_length
             )
 
+            # 🔧 Отладка
+            if not target.strip():
+                print(f"[DEBUG] Пропуск: пустой target для '{text}'")
+            if not generated.strip():
+                print(f"[DEBUG] Пропуск: пустая генерация")
+
             if target.strip() and generated.strip():
                 references.append(target)
                 candidates.append(generated)
@@ -208,21 +238,23 @@ def evaluate_on_dataset(
                 pbar.update(1)
 
         except Exception as e:
+            print(f"[ERROR] Исключение для '{text}': {e}")
             continue
 
     pbar.close()
 
     if not references:
         print("⚠️ Не удалось сгенерировать ни одного примера.")
-        return {"rouge-1": 0.0, "rouge-2": 0.0, "rouge-l": 0.0}
+        return {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
 
-    rouge_scores = compute_rouge_scores(references, candidates)
+    rouge_scores = compute_rouge_scores(references, candidates, use_stemmer=True)
+
     print(f"ROUGE-1: {rouge_scores['rouge1']:.4f}")
     print(f"ROUGE-2: {rouge_scores['rouge2']:.4f}")
     print(f"ROUGE-L: {rouge_scores['rougeL']:.4f}")
 
     return {
-        "rouge-1": float(rouge_scores['rouge1']),
-        "rouge-2": float(rouge_scores['rouge2']),
-        "rouge-l": float(rouge_scores['rougeL'])
+        "rouge1": float(rouge_scores['rouge1']),
+        "rouge2": float(rouge_scores['rouge2']),
+        "rougeL": float(rouge_scores['rougeL'])
     }

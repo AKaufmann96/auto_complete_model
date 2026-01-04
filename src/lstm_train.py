@@ -14,28 +14,25 @@ from src.eval_lstm import evaluate_model, generate_examples
 MODEL_SAVE_PATH = "models/lstm_model.pth"
 os.makedirs("models", exist_ok=True)
 
-# Гиперпараметры
-BATCH_SIZE = 256
-EMBEDDING_DIM = 128
-HIDDEN_DIM = 256
-NUM_LAYERS = 2
-DROPOUT = 0.3
-LEARNING_RATE = 0.001
-NUM_EPOCHS = 10
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_GEN_LENGTH = 15
-TEMPERATURE = 0.8
-
 
 def train_epoch(
     model: LSTMModel,
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
     criterion: nn.CrossEntropyLoss,
-    pad_idx: int
+    pad_idx: int,
+    device: str
 ):
     """
     Обучение модели на одной эпохе.
+
+    Аргументы:
+        model: обучаемая модель
+        dataloader: загрузчик данных
+        optimizer: оптимизатор
+        criterion: функция потерь
+        pad_idx: индекс паддинга для маски
+        device: устройство ('cuda' или 'cpu')
     """
     model.train()
     total_loss = 0.0
@@ -44,8 +41,9 @@ def train_epoch(
 
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
     for input_ids, target_ids in progress_bar:
-        input_ids = input_ids.to(DEVICE)      # (batch_size, seq_len)
-        target_ids = target_ids.to(DEVICE)    # (batch_size, seq_len)
+        # Переносим данные на устройство
+        input_ids = input_ids.to(device)      # (batch_size, seq_len)
+        target_ids = target_ids.to(device)    # (batch_size, seq_len)
 
         optimizer.zero_grad()
 
@@ -82,15 +80,43 @@ def train_epoch(
     return avg_loss, accuracy
 
 
-def train_model():
+def train_model(
+    num_epochs: int = 10,
+    batch_size: int = 256,
+    lr: float = 0.001,
+    hidden_size: int = 256,
+    embedding_dim: int = 128,
+    num_layers: int = 2,
+    dropout: float = 0.3,
+    max_gen_length: int = 15,
+    temperature: float = 0.8,
+    max_length: int = 128,
+    device: str = None
+):
     """
-    Основная функция обучения модели.
+    Основная функция обучения LSTM-модели для автодополнения текста.
+
+    Аргументы:
+        num_epochs: количество эпох обучения
+        batch_size: размер батча
+        lr: скорость обучения для Adam
+        hidden_size: размер скрытого состояния LSTM
+        embedding_dim: размер векторов эмбеддингов
+        num_layers: количество слоёв LSTM
+        dropout: вероятность дропаута в модели
+        max_gen_length: максимальная длина генерации при примерах
+        temperature: температура для сэмплирования (сглаживание логитов)
+        max_length: максимальная длина последовательности в модели
+        device: устройство ('cuda' или 'cpu'). Если None — автоматически.
     """
-    print(f"Используется устройство: {DEVICE}")
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    print(f"Используется устройство: {device}")
 
     # Загрузка данных
-    train_loader = get_dataloader("train", batch_size=BATCH_SIZE)
-    val_loader = get_dataloader("val", batch_size=BATCH_SIZE)
+    train_loader = get_dataloader("train", batch_size=batch_size)
+    val_loader = get_dataloader("val", batch_size=batch_size)
 
     vocab = train_loader.dataset.vocab
     vocab_size = len(vocab)
@@ -100,30 +126,43 @@ def train_model():
     # Инициализация модели
     model = LSTMModel(
         vocab_size=vocab_size,
-        embedding_dim=EMBEDDING_DIM,
-        hidden_dim=HIDDEN_DIM,
-        num_layers=NUM_LAYERS,
-        dropout=DROPOUT,
+        embedding_dim=embedding_dim,
+        hidden_dim=hidden_size,
+        num_layers=num_layers,
+        dropout=dropout,
         pad_idx=pad_idx,
-        max_length=128  # Передаём max_length
-    ).to(DEVICE)
+        max_length=max_length
+    ).to(device)
 
     # Оптимизатор и лосс
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
     # Обучение
     best_val_loss = float("inf")
 
-    for epoch in range(NUM_EPOCHS):
-        print(f"\nЭпоха {epoch + 1}/{NUM_EPOCHS}")
+    for epoch in range(num_epochs):
+        print(f"\nЭпоха {epoch + 1}/{num_epochs}")
 
         # Обучение
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, pad_idx)
+        train_loss, train_acc = train_epoch(
+            model=model,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            criterion=criterion,
+            pad_idx=pad_idx,
+            device=device
+        )
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
 
         # Валидация
-        val_loss, val_acc = evaluate_model(model, val_loader, criterion, DEVICE, pad_idx)
+        val_loss, val_acc = evaluate_model(
+            model=model,
+            dataloader=val_loader,
+            criterion=criterion,
+            device=device,
+            pad_idx=pad_idx
+        )
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
         # Примеры генерации
@@ -135,13 +174,13 @@ def train_model():
             "in the bank there was",
         ]
         generate_examples(
-            model,
-            sample_texts,
-            vocab,
-            reverse_vocab,
-            DEVICE,
-            max_length=MAX_GEN_LENGTH,
-            temperature=TEMPERATURE,
+            model=model,
+            sample_texts=sample_texts,
+            vocab=vocab,
+            reverse_vocab=reverse_vocab,
+            device=device,
+            max_length=max_gen_length,
+            temperature=temperature,
         )
 
         # Сохранение лучшей модели
@@ -154,4 +193,5 @@ def train_model():
 
 
 if __name__ == "__main__":
+    # Запуск с параметрами по умолчанию
     train_model()
