@@ -1,5 +1,3 @@
-# src/eval_lstm.py
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -17,10 +15,11 @@ def evaluate_model(
     model: LSTMModel,
     dataloader: DataLoader,
     criterion: torch.nn.Module,
-    device: str = "cpu"
+    device: str = "cpu",
+    pad_idx: int = 0
 ) -> Tuple[float, float]:
     """
-    Оценивает модель на выборке: возвращает средний loss и accuracy.
+    Оценивает модель: loss и accuracy с маской на <PAD>.
     """
     model.eval()
     total_loss = 0.0
@@ -32,16 +31,26 @@ def evaluate_model(
             input_ids = input_ids.to(device)
             target_ids = target_ids.to(device)
 
-            logits = model(input_ids)
-            loss = criterion(logits, target_ids)
+            logits = model(input_ids)  # (B, T, V)
 
+            # Reshape для loss
+            loss = criterion(
+                logits.view(-1, logits.size(-1)),
+                target_ids.view(-1)
+            )
             total_loss += loss.item()
-            preds = torch.argmax(logits, dim=-1)
-            correct += (preds == target_ids).sum().item()
-            total += target_ids.numel()
+
+            # Accuracy с маской
+            preds = torch.argmax(logits, dim=-1)  # (B, T)
+            mask = target_ids != pad_idx
+            n_correct = ((preds == target_ids) & mask).sum().item()
+            n_total = mask.sum().item()
+
+            correct += n_correct
+            total += n_total
 
     avg_loss = total_loss / len(dataloader)
-    accuracy = correct / total
+    accuracy = correct / total if total > 0 else 0.0
     return avg_loss, accuracy
 
 
@@ -51,13 +60,12 @@ def generate_completion(
     vocab: dict,
     reverse_vocab: dict,
     device: str = "cpu",
-    max_gen_length: int = 15,  # Уменьшено для скорости
-    temperature: float = 0.7   # Снижено для менее шумной генерации
-) -> str:
+    max_gen_length: int = 15,
+    temperature: float = 0.7
+) -> Tuple[str, str, str]:
     """
-    Генерирует продолжение текста.
-    :param input_text: Полный текст.
-    :return: context, target, generated
+    Генерирует продолжение на основе первых 3/4 текста.
+    :return: (context, target, generated)
     """
     model.eval()
     with torch.no_grad():
@@ -65,12 +73,12 @@ def generate_completion(
         if len(tokens) < 2:
             return "", "", ""
 
-        # Берём 50–75% как контекст (но минимум 1 токен)
-        input_length = max(1, min(len(tokens) - 1, len(tokens) // 2))
+        # Берём 3/4 как контекст
+        input_length = max(1, min(len(tokens) - 1, 3 * len(tokens) // 4))
         context = " ".join(tokens[:input_length])
         target = " ".join(tokens[input_length:])
 
-        # Генерируем продолжение
+        # Генерация
         generated = model.generate(
             start_text=context,
             vocab=vocab,
@@ -88,18 +96,14 @@ def compute_rouge_scores(
     use_stemmer: bool = True
 ) -> Dict[str, float]:
     """
-    Вычисляет усреднённые ROUGE-метрики (R-1, R-2, R-L).
+    Вычисляет усреднённые ROUGE-метрики.
     """
     scorer = rouge_scorer.RougeScorer(
         ['rouge1', 'rouge2', 'rougeL'],
         use_stemmer=use_stemmer
     )
 
-    scores = {
-        'rouge1': [],
-        'rouge2': [],
-        'rougeL': []
-    }
+    scores = {'rouge1': [], 'rouge2': [], 'rougeL': []}
 
     for ref, cand in zip(references, candidates):
         if not ref.strip() or not cand.strip():
@@ -109,9 +113,7 @@ def compute_rouge_scores(
         scores['rouge2'].append(score['rouge2'].fmeasure)
         scores['rougeL'].append(score['rougeL'].fmeasure)
 
-    avg_scores = {
-        k: np.mean(v) if v else 0.0 for k, v in scores.items()
-    }
+    avg_scores = {k: np.mean(v) if v else 0.0 for k, v in scores.items()}
     return avg_scores
 
 
@@ -125,7 +127,7 @@ def generate_examples(
     temperature: float = 0.8
 ):
     """
-    Выводит примеры генерации модели.
+    Выводит примеры генерации.
     """
     model.eval()
     with torch.no_grad():
@@ -147,23 +149,16 @@ def evaluate_on_dataset(
     split: str = "val",
     batch_size: int = 64,
     device: str = "cpu",
-    max_samples: int = 500,        # Ограничено
-    max_gen_length: int = 15       # Короткая генерация
+    max_samples: int = 500,
+    max_gen_length: int = 15
 ):
     """
-    Полная оценка модели на датасете: ROUGE-метрики.
+    Оценка модели по ROUGE на реальных данных.
     """
     print(f"Оценка модели на {split} выборке...")
     model.eval()
     torch.set_grad_enabled(False)
 
-    # Загружаем датасет и извлекаем тексты
-    dataloader = get_dataloader(split=split, batch_size=batch_size, num_workers=0)
-    dataset = dataloader.dataset
-    vocab = dataset.vocab
-    reverse_vocab = {idx: token for token, idx in vocab.items()}
-
-    # Извлекаем тексты из CSV (надёжнее, чем хранение в dataset.texts)
     path = {
         "train": "data/train.csv",
         "val": "data/val.csv",
@@ -176,22 +171,26 @@ def evaluate_on_dataset(
     df = pd.read_csv(path)
     texts = df["text"].tolist()
 
+    vocab = model.vocab if hasattr(model, 'vocab') else None
+    if vocab is None:
+        # Если нет — загружаем из датасета
+        temp_loader = get_dataloader(split="train", batch_size=1)
+        vocab = temp_loader.dataset.vocab
+
+    reverse_vocab = {idx: token for token, idx in vocab.items()}
     references = []
     candidates = []
     processed = 0
 
-    # Используем tqdm для прогресса
     pbar = tqdm(total=max_samples, desc="Генерация", unit="текст")
 
-    for i, text in enumerate(texts):
+    for text in texts:
         if processed >= max_samples:
             break
-
         text = text.strip()
         if not text:
             continue
 
-        # Генерация
         try:
             _, target, generated = generate_completion(
                 model=model,
@@ -209,7 +208,6 @@ def evaluate_on_dataset(
                 pbar.update(1)
 
         except Exception as e:
-            # Пропускаем проблемные примеры
             continue
 
     pbar.close()
@@ -218,7 +216,6 @@ def evaluate_on_dataset(
         print("⚠️ Не удалось сгенерировать ни одного примера.")
         return {"rouge-1": 0.0, "rouge-2": 0.0, "rouge-l": 0.0}
 
-    # Вычисляем ROUGE
     rouge_scores = compute_rouge_scores(references, candidates)
     print(f"ROUGE-1: {rouge_scores['rouge1']:.4f}")
     print(f"ROUGE-2: {rouge_scores['rouge2']:.4f}")

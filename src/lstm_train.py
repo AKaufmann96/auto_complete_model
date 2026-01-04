@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import os
-import numpy as np
 from tqdm import tqdm
 
+# Исправленные импорты
 from src.lstm_model import LSTMModel
 from src.next_token_dataset import get_dataloader
 from src.eval_lstm import evaluate_model, generate_examples
@@ -23,7 +23,7 @@ DROPOUT = 0.3
 LEARNING_RATE = 0.001
 NUM_EPOCHS = 10
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_GEN_LENGTH = 10
+MAX_GEN_LENGTH = 15
 TEMPERATURE = 0.8
 
 
@@ -32,6 +32,7 @@ def train_epoch(
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
     criterion: nn.CrossEntropyLoss,
+    pad_idx: int
 ):
     """
     Обучение модели на одной эпохе.
@@ -43,25 +44,41 @@ def train_epoch(
 
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
     for input_ids, target_ids in progress_bar:
-        input_ids = input_ids.to(DEVICE)  # (batch_size, seq_len)
-        target_ids = target_ids.to(DEVICE)  # (batch_size,)
+        input_ids = input_ids.to(DEVICE)      # (batch_size, seq_len)
+        target_ids = target_ids.to(DEVICE)    # (batch_size, seq_len)
 
         optimizer.zero_grad()
-        logits = model(input_ids)  # (batch_size, vocab_size)
-        loss = criterion(logits, target_ids)
+
+        # Прямой проход: (B, T, V)
+        logits = model(input_ids)
+
+        # Reshape для CrossEntropyLoss
+        loss = criterion(
+            logits.view(-1, logits.size(-1)),   # (B*T, V)
+            target_ids.view(-1)                 # (B*T,)
+        )
 
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
-        preds = torch.argmax(logits, dim=-1)
-        correct += (preds == target_ids).sum().item()
-        total += target_ids.size(0)
 
-        progress_bar.set_postfix({"loss": loss.item(), "acc": f"{correct/total:.3f}"})
+        # Подсчёт accuracy с маской
+        preds = torch.argmax(logits, dim=-1)   # (B, T)
+        mask = target_ids != pad_idx
+        n_correct = ((preds == target_ids) & mask).sum().item()
+        n_total = mask.sum().item()
+
+        correct += n_correct
+        total += n_total
+
+        progress_bar.set_postfix({
+            "loss": f"{loss.item():.4f}",
+            "acc": f"{n_correct/n_total:.3f}" if n_total > 0 else 0.0
+        })
 
     avg_loss = total_loss / len(dataloader)
-    accuracy = correct / total
+    accuracy = correct / total if total > 0 else 0.0
     return avg_loss, accuracy
 
 
@@ -74,9 +91,11 @@ def train_model():
     # Загрузка данных
     train_loader = get_dataloader("train", batch_size=BATCH_SIZE)
     val_loader = get_dataloader("val", batch_size=BATCH_SIZE)
+
     vocab = train_loader.dataset.vocab
     vocab_size = len(vocab)
     pad_idx = vocab["<PAD>"]
+    reverse_vocab = {idx: token for token, idx in vocab.items()}
 
     # Инициализация модели
     model = LSTMModel(
@@ -86,6 +105,7 @@ def train_model():
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
         pad_idx=pad_idx,
+        max_length=128  # Передаём max_length
     ).to(DEVICE)
 
     # Оптимизатор и лосс
@@ -94,17 +114,16 @@ def train_model():
 
     # Обучение
     best_val_loss = float("inf")
-    reverse_vocab = {idx: token for token, idx in vocab.items()}
 
     for epoch in range(NUM_EPOCHS):
         print(f"\nЭпоха {epoch + 1}/{NUM_EPOCHS}")
 
         # Обучение
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion)
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, pad_idx)
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
 
         # Валидация
-        val_loss, val_acc = evaluate_model(model, val_loader, criterion, DEVICE)
+        val_loss, val_acc = evaluate_model(model, val_loader, criterion, DEVICE, pad_idx)
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
         # Примеры генерации
