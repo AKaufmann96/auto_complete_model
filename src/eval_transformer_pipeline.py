@@ -1,6 +1,5 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -12,7 +11,7 @@ import os
 def calculate_rouge_batch(
     hypotheses: List[str],
     references: List[str],
-    use_stemmer: bool = True
+    use_stemmer: bool = False  # Изменено: False для английского языка
 ) -> Dict[str, float]:
     """
     Вычисляет усреднённые ROUGE-метрики по списку гипотез и эталонов.
@@ -20,7 +19,7 @@ def calculate_rouge_batch(
     Аргументы:
         hypotheses: список сгенерированных продолжений
         references: список ожидаемых продолжений
-        use_stemmer: использовать ли стеммер (рекомендуется для русского)
+        use_stemmer: использовать ли стеммер (False для английского)
 
     Возвращает:
         Словарь с метриками: {'rouge1': ..., 'rouge2': ..., 'rougeL': ...}
@@ -55,12 +54,12 @@ def evaluate_transformer(
     max_samples: int = 500,
     max_length: int = 30,
     device: str = None,
-    batch_size: int = 8
-) -> Dict[str, float]:
+) -> Dict[str, float]:  # Удалён batch_size — не используется
     """
     Оценка предобученной языковой модели (например, DistilGPT-2) на задаче автодополнения.
 
-    Модель генерирует продолжение текста, которое сравнивается с реальным "хвостом" исходного текста.
+    Модель получает первые 3/4 текста и должна предсказать оставшиеся 1/4.
+    Генерация ограничена длиной целевого хвоста (до max_length токенов).
 
     Аргументы:
         model_name: имя модели из Hugging Face Hub
@@ -68,7 +67,6 @@ def evaluate_transformer(
         max_samples: максимальное число примеров для оценки
         max_length: максимальное число новых токенов для генерации
         device: устройство ('cuda' или 'cpu')
-        batch_size: размер батча (не используется напрямую)
 
     Возвращает:
         Словарь с усреднёнными ROUGE-метриками:
@@ -80,7 +78,6 @@ def evaluate_transformer(
     print(f"Загрузка токенизатора и модели: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Установка pad_token, если отсутствует
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         print("⚠️ pad_token не задан. Используется eos_token как pad_token.")
@@ -88,7 +85,6 @@ def evaluate_transformer(
     model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
     model.eval()
 
-    # Загрузка оригинальных текстов
     data_path = f"data/{split}.csv"
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Файл данных не найден: {data_path}")
@@ -98,37 +94,35 @@ def evaluate_transformer(
     texts = [t.strip() for t in texts if t.strip()]
     texts = texts[:max_samples]
 
-    all_hypotheses = []  # сгенерированные продолжения
-    all_references = []  # реальные продолжения
+    all_hypotheses = []
+    all_references = []
 
     print(f"Оценка на {split} (max_samples={max_samples})...")
 
     with torch.no_grad():
-        for i, text in enumerate(tqdm(texts, desc="Генерация", unit="текст")):
+        for text in tqdm(texts, desc="Генерация", unit="текст"):
             if not text:
                 continue
 
-            # Полная токенизация текста
             full_encoding = tokenizer(text, return_tensors="pt", truncation=False).input_ids[0]
-            if len(full_encoding) <= 1:
-                continue  # слишком короткий — нет места для продолжения
+            if len(full_encoding) < 2:
+                continue
 
-            # Определяем длину контекста: min(50, len-1), но не менее 1
-            context_len = min(50, len(full_encoding) - 1)
-            input_ids = full_encoding[:context_len].unsqueeze(0).to(device)  # (1, T)
+            # Вычисляем длину контекста: 3/4 длины текста
+            context_len = max(1, min(int(0.75 * len(full_encoding)), len(full_encoding) - 1))
 
-            # Эталонное продолжение — оставшиеся токены
-            target_token_ids = full_encoding[context_len:]
-            reference_suffix = tokenizer.decode(target_token_ids, skip_special_tokens=True)
+            input_ids = full_encoding[:context_len].unsqueeze(0).to(device)
+            target_tokens = full_encoding[context_len:]
 
-            # Создаём attention_mask
+            # Ограничиваем длину генерации: min(длина хвоста, max_length)
+            max_new_tokens = min(len(target_tokens), max_length)
+
             attention_mask = (input_ids != tokenizer.pad_token_id).long().to(device)
 
-            # Генерация новых токенов
             outputs = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=max_length,
+                max_new_tokens=max_new_tokens,
                 temperature=0.8,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id,
@@ -137,28 +131,15 @@ def evaluate_transformer(
                 top_p=0.95
             )
 
-            # Декодируем вход
-            prefix_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+            # Извлекаем продолжение по токенам — корректно и точно
+            generated_suffix_ids = outputs[0, context_len:]
+            hypothesis_suffix = tokenizer.decode(generated_suffix_ids, skip_special_tokens=True)
 
-            # Сгенерированный текст
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-            # Извлечение продолжения
-            if generated_text.startswith(prefix_text):
-                hypothesis_suffix = generated_text[len(prefix_text):].strip()
-            else:
-                # Пытаемся найти префикс в сгенерированном тексте
-                idx = generated_text.lower().find(prefix_text.lower())
-                if idx != -1:
-                    end_idx = idx + len(prefix_text)
-                    hypothesis_suffix = generated_text[end_idx:].strip()
-                else:
-                    hypothesis_suffix = generated_text.strip()
+            reference_suffix = tokenizer.decode(target_tokens, skip_special_tokens=True)
 
             all_hypotheses.append(hypothesis_suffix)
             all_references.append(reference_suffix)
 
-    # Фильтрация пустых пар
     non_empty_pairs = [
         (h, r) for h, r in zip(all_hypotheses, all_references)
         if h.strip() and r.strip()
@@ -168,9 +149,8 @@ def evaluate_transformer(
         print("⚠️ Не найдено ни одной пары с непустыми гипотезой и эталоном.")
         return {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
 
-    # Расчёт итоговых метрик
     hypotheses, references = zip(*non_empty_pairs)
-    rouge_scores = calculate_rouge_batch(hypotheses, references)
+    rouge_scores = calculate_rouge_batch(hypotheses, references, use_stemmer=False)
 
     print(f"✅ Использовано для оценки: {len(non_empty_pairs)} примеров")
     return rouge_scores
@@ -203,13 +183,12 @@ def generate_transformer_examples(
 
     with torch.no_grad():
         for text in sample_texts:
-            # Токенизация
             full_encoding = tokenizer(text, return_tensors="pt", truncation=False).input_ids[0]
-            if len(full_encoding) <= 1:
+            if len(full_encoding) < 2:
                 print(f"  '{text}' → [текст слишком короткий]")
                 continue
 
-            context_len = min(50, len(full_encoding))
+            context_len = max(1, min(int(0.75 * len(full_encoding)), len(full_encoding) - 1))
             input_ids = full_encoding[:context_len].unsqueeze(0).to(device)
 
             attention_mask = (input_ids != tokenizer.pad_token_id).long().to(device)
@@ -226,18 +205,8 @@ def generate_transformer_examples(
                 top_p=0.95
             )
 
-            generated = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            prefix_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-
-            if generated.startswith(prefix_text):
-                completion = generated[len(prefix_text):].strip()
-            else:
-                idx = generated.lower().find(prefix_text.lower())
-                if idx != -1:
-                    end_idx = idx + len(prefix_text)
-                    completion = generated[end_idx:].strip()
-                else:
-                    completion = generated.strip()
+            generated_suffix_ids = outputs[0, context_len:]
+            completion = tokenizer.decode(generated_suffix_ids, skip_special_tokens=True)
 
             print(f"  '{text}' → '{completion}'")
     print()
@@ -255,7 +224,6 @@ def main():
     parser.add_argument("--split", type=str, choices=["train", "val", "test"], default="val", help="Сплит для оценки")
     parser.add_argument("--max_samples", type=int, default=500, help="Макс. число примеров")
     parser.add_argument("--max_length", type=int, default=30, help="Макс. длина генерации (токенов)")
-    parser.add_argument("--batch_size", type=int, default=8, help="Размер батча")
     parser.add_argument("--device", type=str, default=None, help="Устройство: 'cuda' или 'cpu'")
 
     args = parser.parse_args()
@@ -266,7 +234,6 @@ def main():
         max_samples=args.max_samples,
         max_length=args.max_length,
         device=args.device,
-        batch_size=args.batch_size
     )
 
     print("\n✅ Оценка завершена:")

@@ -1,3 +1,11 @@
+"""
+eval_lstm.py
+
+Функции оценки LSTM-модели:
+- evaluate_model: валидация по loss и accuracy (для обучения).
+- evaluate_on_dataset: оценка по ROUGE на восстановлении последней четверти текста.
+"""
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -8,11 +16,9 @@ import pandas as pd
 import os
 import pickle
 
-from src.lstm_model import LSTMModel
-
 
 def evaluate_model(
-    model: LSTMModel,
+    model: torch.nn.Module,
     dataloader: DataLoader,
     criterion: torch.nn.Module,
     device: str = "cpu",
@@ -20,6 +26,7 @@ def evaluate_model(
 ) -> Tuple[float, float]:
     """
     Оценивает модель по loss и accuracy с маской на <PAD>.
+    Используется для мониторинга обучения.
     """
     model.eval()
     total_loss = 0.0
@@ -54,13 +61,21 @@ def evaluate_model(
     return avg_loss, accuracy
 
 
+def normalize_text(text: str) -> str:
+    """
+    Нормализация текста: нижний регистр, один пробел.
+    """
+    return " ".join(text.lower().strip().split())
+
+
 def generate_completion(
-    model: LSTMModel,
+    model: torch.nn.Module,
     input_text: str,
-    vocab: dict,
-    reverse_vocab: dict,
+    vocab: Dict[str, int],
+    reverse_vocab: Dict[int, str],
     device: str = "cpu",
-    max_gen_length: int = 15,
+    max_gen_tokens: int = 15,
+    context_length: int = 50,
     temperature: float = 0.7
 ) -> Tuple[str, str, str]:
     """
@@ -84,7 +99,8 @@ def generate_completion(
                 start_text=context,
                 vocab=vocab,
                 reverse_vocab=reverse_vocab,
-                max_length=max_gen_length,
+                max_gen_tokens=max_gen_tokens,
+                context_length=context_length,
                 temperature=temperature,
                 device=device
             )
@@ -104,7 +120,7 @@ def compute_rouge_scores(
     use_stemmer: bool = True
 ) -> Dict[str, float]:
     """
-    Вычисляет усреднённые ROUGE-метрики.
+    Вычисляет усреднённые ROUGE-метрики (F1) с нормализацией.
     """
     scorer = rouge_scorer.RougeScorer(
         ['rouge1', 'rouge2', 'rougeL'],
@@ -114,8 +130,12 @@ def compute_rouge_scores(
     scores = {'rouge1': [], 'rouge2': [], 'rougeL': []}
 
     for ref, cand in zip(references, candidates):
-        if not ref.strip() or not cand.strip():
+        ref = normalize_text(ref)
+        cand = normalize_text(cand)
+
+        if not ref or not cand:
             continue
+
         score = scorer.score(ref, cand)
         scores['rouge1'].append(score['rouge1'].fmeasure)
         scores['rouge2'].append(score['rouge2'].fmeasure)
@@ -126,12 +146,13 @@ def compute_rouge_scores(
 
 
 def generate_examples(
-    model: LSTMModel,
+    model: torch.nn.Module,
     sample_texts: List[str],
-    vocab: dict,
-    reverse_vocab: dict,
+    vocab: Dict[str, int],
+    reverse_vocab: Dict[int, str],
     device: str,
-    max_length: int = 10,
+    max_gen_tokens: int = 10,
+    context_length: int = 50,
     temperature: float = 0.8
 ):
     """
@@ -140,13 +161,14 @@ def generate_examples(
     model.eval()
     with torch.no_grad():
         for text in sample_texts:
-            print(f"[LSTM] Обработка: '{text}'")  # 🔧 Отладка
+            print(f"[LSTM] Обработка: '{text}'")
             try:
                 completion = model.generate(
                     start_text=text,
                     vocab=vocab,
                     reverse_vocab=reverse_vocab,
-                    max_length=max_length,
+                    max_gen_tokens=max_gen_tokens,
+                    context_length=context_length,
                     temperature=temperature,
                     device=device
                 )
@@ -159,15 +181,17 @@ def generate_examples(
 
 
 def evaluate_on_dataset(
-    model: LSTMModel,
+    model: torch.nn.Module,
     split: str = "val",
     batch_size: int = 64,
     device: str = "cpu",
     max_samples: int = 500,
-    max_gen_length: int = 15
+    max_gen_tokens: int = 15,
+    context_length: int = 50
 ) -> Dict[str, float]:
     """
     Оценка модели LSTM по ROUGE-метрикам на реальных данных.
+    Модель получает первые 3/4 текста, генерирует продолжение, сравнивается с эталоном.
     """
     print(f"Оценка модели на {split} выборке...")
 
@@ -186,7 +210,7 @@ def evaluate_on_dataset(
     df = pd.read_csv(path, dtype=str).fillna("")
     texts = df["text"].tolist()
 
-    # 🔧 Загрузка vocab
+    # Загрузка vocab
     vocab = getattr(model, 'vocab', None)
     if vocab is None:
         vocab_path = "models/vocab.pkl"
@@ -222,16 +246,14 @@ def evaluate_on_dataset(
                 vocab=vocab,
                 reverse_vocab=reverse_vocab,
                 device=device,
-                max_gen_length=max_gen_length
+                max_gen_tokens=max_gen_tokens,
+                context_length=context_length
             )
 
-            # 🔧 Отладка
-            if not target.strip():
-                print(f"[DEBUG] Пропуск: пустой target для '{text}'")
-            if not generated.strip():
-                print(f"[DEBUG] Пропуск: пустая генерация")
+            target = normalize_text(target)
+            generated = normalize_text(generated)
 
-            if target.strip() and generated.strip():
+            if target and generated:
                 references.append(target)
                 candidates.append(generated)
                 processed += 1

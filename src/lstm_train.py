@@ -1,3 +1,11 @@
+"""
+lstm_train.py
+
+Обучение LSTM-модели для автодополнения текста.
+Модель обучается на задаче предсказания следующего токена (teacher forcing).
+Оценка — по ROUGE на восстановлении последней четверти текста.
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,7 +16,7 @@ from tqdm import tqdm
 # Исправленные импорты
 from src.lstm_model import LSTMModel
 from src.next_token_dataset import get_dataloader
-from src.eval_lstm import evaluate_model, generate_examples
+from src.eval_lstm import evaluate_model, generate_examples, evaluate_on_dataset
 
 # Пути
 MODEL_SAVE_PATH = "models/lstm_model.pth"
@@ -88,9 +96,9 @@ def train_model(
     embedding_dim: int = 128,
     num_layers: int = 2,
     dropout: float = 0.3,
-    max_gen_length: int = 15,
+    max_gen_tokens: int = 15,        # сколько токенов генерировать
+    context_length: int = 50,        # сколько токенов из контекста использовать
     temperature: float = 0.8,
-    max_length: int = 128,
     device: str = None
 ):
     """
@@ -104,9 +112,9 @@ def train_model(
         embedding_dim: размер векторов эмбеддингов
         num_layers: количество слоёв LSTM
         dropout: вероятность дропаута в модели
-        max_gen_length: максимальная длина генерации при примерах
-        temperature: температура для сэмплирования (сглаживание логитов)
-        max_length: максимальная длина последовательности в модели
+        max_gen_tokens: максимальное число токенов для генерации
+        context_length: длина контекста (берутся последние токены)
+        temperature: температура для сэмплирования
         device: устройство ('cuda' или 'cpu'). Если None — автоматически.
     """
     if device is None:
@@ -115,8 +123,8 @@ def train_model(
     print(f"Используется устройство: {device}")
 
     # Загрузка данных
-    train_loader = get_dataloader("train", batch_size=batch_size)
-    val_loader = get_dataloader("val", batch_size=batch_size)
+    train_loader = get_dataloader("train", batch_size=batch_size, max_length=context_length)
+    val_loader = get_dataloader("val", batch_size=batch_size, max_length=context_length)
 
     vocab = train_loader.dataset.vocab
     vocab_size = len(vocab)
@@ -130,8 +138,7 @@ def train_model(
         hidden_dim=hidden_size,
         num_layers=num_layers,
         dropout=dropout,
-        pad_idx=pad_idx,
-        max_length=max_length
+        pad_idx=pad_idx
     ).to(device)
 
     # Оптимизатор и лосс
@@ -155,7 +162,7 @@ def train_model(
         )
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
 
-        # Валидация
+        # Валидация (на next-token задаче)
         val_loss, val_acc = evaluate_model(
             model=model,
             dataloader=val_loader,
@@ -179,7 +186,8 @@ def train_model(
             vocab=vocab,
             reverse_vocab=reverse_vocab,
             device=device,
-            max_length=max_gen_length,
+            max_gen_tokens=10,
+            context_length=context_length,
             temperature=temperature,
         )
 
@@ -190,6 +198,22 @@ def train_model(
             print(f"Модель сохранена: {MODEL_SAVE_PATH}")
 
     print("Обучение завершено.")
+
+    # Финальная оценка по ROUGE на val-выборке
+    print("\nЗапуск финальной оценки по ROUGE на val-выборке...")
+    rouge_scores = evaluate_on_dataset(
+        model=model,
+        split="val",
+        batch_size=64,
+        device=device,
+        max_samples=500,
+        max_gen_tokens=max_gen_tokens,
+        context_length=context_length
+    )
+
+    print("Финальные метрики ROUGE:")
+    for k, v in rouge_scores.items():
+        print(f"  {k.upper()}: {v:.4f}")
 
 
 if __name__ == "__main__":
